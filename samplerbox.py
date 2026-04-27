@@ -357,35 +357,44 @@ button_states = {pin: False for pin in BUTTON_PINS}
 def play_note(midinote, velocity=127):
     global playingnotes, samples
 
-    # 1. Internal trigger (what you see in the logs now)
-    MidiCallback([144, midinote, velocity], None)
+    # 1. Calculate Status Byte based on MIDI_CHANNEL (Omni defaults to Ch 1 for output)
+    out_channel = MIDI_CHANNEL if MIDI_CHANNEL != 0 else 1
+    status_byte = 0x90 | (out_channel - 1)
 
-    # 2. EXTERNAL trigger (This sends the data to your MIDI OUT port)
+    # 2. Internal trigger
+    MidiCallback([status_byte, midinote, velocity], None)
+
+    # 3. EXTERNAL trigger (Sends to MIDI OUT)
     if USE_SERIALPORT_MIDI:
         try:
-            # We must send raw bytes: Status (0x90 = NoteOn Ch1), Note, Velocity
-            ser.write(bytearray([0x90, midinote, velocity]))
+            ser.write(bytearray([status_byte, midinote, velocity]))
         except:
             pass
 
-    # 3. Local sample playback
+    # 4. Local sample playback
     if (midinote, velocity) in samples:
         playingnotes.setdefault(midinote, []).append(samples[midinote, velocity].play(midinote))
+    elif (midinote, 127) in samples:
+        playingnotes.setdefault(midinote, []).append(samples[midinote, 127].play(midinote))
 
 def stop_note(midinote):
     global playingnotes
 
-    # 1. Internal trigger
-    MidiCallback([128, midinote, 0], None)
+    # 1. Calculate Status Byte for Note Off (0x80)
+    out_channel = MIDI_CHANNEL if MIDI_CHANNEL != 0 else 1
+    status_byte = 0x80 | (out_channel - 1)
 
-    # 2. EXTERNAL trigger (Note Off = 0x80)
+    # 2. Internal trigger
+    MidiCallback([status_byte, midinote, 0], None)
+
+    # 3. EXTERNAL trigger
     if USE_SERIALPORT_MIDI:
         try:
-            ser.write(bytearray([0x80, midinote, 0]))
+            ser.write(bytearray([status_byte, midinote, 0]))
         except:
             pass
 
-    # 3. Local sample stop
+    # 4. Local sample stop
     if midinote in playingnotes:
         for n in playingnotes[midinote]:
             if hasattr(n, 'fadeout'):
