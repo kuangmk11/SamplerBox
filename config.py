@@ -12,4 +12,5 @@ USE_SERIALPORT_MIDI = True              # Set to True to enable MIDI IN via Seri
 USE_SYSTEMLED = True                    # Flashing LED after successful boot, only works on RPi/Linux
 USE_ENCODER = True                      # Set to True to use MOSI/MISO encoder
 USE_SSD1306 = True
-preset = 0 # Initialize here so DisplayUpdate can find it on boot
+preset = 0                               # Initialize here so DisplayUpdate can find it on boot
+MIDI_CHANNEL = 0                         # Use 0 for OMNI (receive on all channels), or 1-16 for a specific channel
