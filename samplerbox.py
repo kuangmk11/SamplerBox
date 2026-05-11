@@ -26,8 +26,6 @@ import struct
 import rtmidi_python as rtmidi
 import samplerbox_audio
 
-oneshot_mode = False
-
 #########################################
 # SLIGHT MODIFICATION OF PYTHON'S WAVE MODULE
 # TO READ CUE MARKERS & LOOP MARKERS
@@ -168,8 +166,7 @@ def AudioCallback(outdata, frame_count, time_info, status):
     outdata[:] = b.reshape(outdata.shape)
 
 def MidiCallback(message, time_stamp):
-    print("MIDI:", message)
-    global playingnotes, sustain, sustainplayingnotes, oneshot_mode
+    global playingnotes, sustain, sustainplayingnotes
     global preset
     messagetype = message[0] >> 4
     messagechannel = (message[0] & 15) + 1
@@ -185,15 +182,14 @@ def MidiCallback(message, time_stamp):
         except:
             pass
     elif messagetype == 8:  # Note off
-        if not oneshot_mode:  # ONLY stop the note if we are NOT in oneshot mode
-            midinote += globaltranspose
-            if midinote in playingnotes:
-                for n in playingnotes[midinote]:
-                    if sustain:
-                        sustainplayingnotes.append(n)
-                    else:
-                        n.fadeout(50)
-                playingnotes[midinote] = []
+        midinote += globaltranspose
+        if midinote in playingnotes:
+            for n in playingnotes[midinote]:
+                if sustain:
+                    sustainplayingnotes.append(n)
+                else:
+                    n.fadeout(50)
+            playingnotes[midinote] = []
     elif messagetype == 12:  # Program change
         print('Program change ' + str(note))
         preset = note
@@ -227,12 +223,6 @@ def LoadSamples():
     LoadingThread = threading.Thread(target=ActuallyLoad)
     LoadingThread.daemon = True
     LoadingThread.start()
-# Update the end of the LoadSamples() function:
-    # ... existing SamplerBox code ...
-    if USE_SSD1306:
-        # If your version of SamplerBox defines 'basename', use that for a cleaner name
-        DisplayUpdate(f"P: {preset}", basename if 'basename' in locals() else "")
-
 
 NOTES = ["c", "c#", "d", "d#", "e", "f", "f#", "g", "g#", "a", "a#", "b"]
 
@@ -240,8 +230,7 @@ def ActuallyLoad():
     global preset
     global samples
     global playingsounds
-    global globalvolume, globaltranspose, oneshot_mode
-    oneshot_mode = False
+    global globalvolume, globaltranspose
     playingsounds = []
     samples = {}
     globalvolume = 10 ** (-12.0/20)  # -12dB default global volume
@@ -255,8 +244,6 @@ def ActuallyLoad():
         display("E%03d" % preset)
         return
     print('Preset loading: %s (%s)' % (preset, basename))
-    if USE_SSD1306:
-        DisplayUpdate(basename, "Loading...")
     display("L%03d" % preset)
     definitionfname = os.path.join(dirname, "definition.txt")
     if os.path.isfile(definitionfname):
@@ -268,12 +255,6 @@ def ActuallyLoad():
                         continue
                     if r'%%transpose' in pattern:
                         globaltranspose = int(pattern.split('=')[1].strip())
-                        continue
-                    #--- ADD THIS PART ---
-                    if r'%%mode' in pattern:
-                        mode_val = pattern.split('=')[1].strip().lower()
-                        oneshot_mode = (mode_val == 'oneshot')
-                        print("One Shot Sample")
                         continue
                     defaultparams = {'midinote': '0', 'velocity': '127', 'notename': ''}
                     if len(pattern.split(',')) > 1:
@@ -345,90 +326,6 @@ except:
 #
 #########################################
 
-import RPi.GPIO as GPIO
-import time
-import threading
-
-BUTTON_PINS = [4, 17, 27, 5, 6, 13, 25, 8, 7] # Changed last '8' to '7' as a guess
-MIDI_NOTES = [36, 38, 40, 41, 43, 45, 47, 48, 50]
-
-button_states = {pin: False for pin in BUTTON_PINS}
-
-def play_note(midinote, velocity=127):
-    global playingnotes, samples
-
-    # 1. Calculate Status Byte based on MIDI_CHANNEL (Omni defaults to Ch 1 for output)
-    out_channel = MIDI_CHANNEL if MIDI_CHANNEL != 0 else 1
-    status_byte = 0x90 | (out_channel - 1)
-
-    # 2. Internal trigger
-    MidiCallback([status_byte, midinote, velocity], None)
-
-    # 3. EXTERNAL trigger (Sends to MIDI OUT)
-    if USE_SERIALPORT_MIDI:
-        try:
-            ser.write(bytearray([status_byte, midinote, velocity]))
-        except:
-            pass
-
-    # 4. Local sample playback
-    if (midinote, velocity) in samples:
-        playingnotes.setdefault(midinote, []).append(samples[midinote, velocity].play(midinote))
-    elif (midinote, 127) in samples:
-        playingnotes.setdefault(midinote, []).append(samples[midinote, 127].play(midinote))
-
-def stop_note(midinote):
-    global playingnotes
-
-    # 1. Calculate Status Byte for Note Off (0x80)
-    out_channel = MIDI_CHANNEL if MIDI_CHANNEL != 0 else 1
-    status_byte = 0x80 | (out_channel - 1)
-
-    # 2. Internal trigger
-    MidiCallback([status_byte, midinote, 0], None)
-
-    # 3. EXTERNAL trigger
-    if USE_SERIALPORT_MIDI:
-        try:
-            ser.write(bytearray([status_byte, midinote, 0]))
-        except:
-            pass
-
-    # 4. Local sample stop
-    if midinote in playingnotes:
-        for n in playingnotes[midinote]:
-            if hasattr(n, 'fadeout'):
-                n.fadeout(50)
-        playingnotes[midinote] = []
-
-def Buttons():
-    GPIO.setmode(GPIO.BCM)
-    for pin in BUTTON_PINS:
-        GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-
-    while True:
-        for i, pin in enumerate(BUTTON_PINS):
-            is_pressed = not GPIO.input(pin)
-            midinote = MIDI_NOTES[i]
-
-            if is_pressed and not button_states[pin]:
-                print(f"Triggering Note: {midinote}") # Debug line
-                play_note(midinote)
-                button_states[pin] = True
-            elif not is_pressed and button_states[pin]:
-                # Only call stop_note if the folder isn't a drum kit
-                if not oneshot_mode:
-                    stop_note(midinote)
-                button_states[pin] = False
-        time.sleep(0.01)
-
-# Start the thread
-ButtonsThread = threading.Thread(target=Buttons)
-ButtonsThread.daemon = True
-ButtonsThread.start()
-
-
-
 if USE_BUTTONS:
     import RPi.GPIO as GPIO
     lastbuttontime = 0
@@ -460,6 +357,7 @@ if USE_BUTTONS:
 # ENCODER
 #
 #########################################
+USE_ENCODER = True
 
 if USE_ENCODER:
     import RPi.GPIO as GPIO
@@ -467,56 +365,95 @@ if USE_ENCODER:
     import time
 
     def EncoderProcess():
-        # MOSI = 10, MISO = 9
-        ENC_A, ENC_B = 10, 9
+        # MOSI = GPIO 10, MISO = GPIO 9
+        ENC_A = 10
+        ENC_B = 9
+        
         GPIO.setmode(GPIO.BCM)
         GPIO.setup(ENC_A, GPIO.IN, pull_up_down=GPIO.PUD_UP)
         GPIO.setup(ENC_B, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
         global preset
-
-        # State tracking
-        outcome = [0, -1, 1, 0, 1, 0, 0, -1, -1, 0, 0, 1, 0, 1, -1, 0]
-        last_AB = (GPIO.input(ENC_A) << 1) | GPIO.input(ENC_B)
-        counter = 0
-
-        # Max folder index (0 and 1)
-        MAX_PRESET = 127
+        last_state = GPIO.input(ENC_A)
+        last_time = time.time()
+        
+        # Adjust this to the highest folder number you have (e.g., 1 for "1 Saw")
+        MAX_PRESET = 1
 
         while True:
-            # Create a 2-bit number from Pin A and B
-            current_A = GPIO.input(ENC_A)
-            current_B = GPIO.input(ENC_B)
-            current_AB = (current_A << 1) | current_B
-
-            if current_AB != last_AB:
-                # Use a state table to determine direction and ignore "half-steps"
-                # This transition index (last_AB + current_AB) filters noise
-                transition = (last_AB << 2) | current_AB
-                counter += outcome[transition]
-
-                # Standard encoders usually need 2 or 4 "state changes" to make 1 click
-                # Change the '4' below to '2' if it becomes too slow
-                if abs(counter) >= 4:
-                    if counter > 0:
+            current_state = GPIO.input(ENC_A)
+            
+            # Trigger only on the falling edge (High to Low)
+            if current_state == 0 and last_state == 1:
+                now = time.time()
+                
+                # Debounce: only allow one trigger every 100ms
+                if (now - last_time) > 0.1:
+                    # Check B pin to determine direction
+                    if GPIO.input(ENC_B) == 0:
                         preset += 1
                     else:
                         preset -= 1
 
                     # Boundary handling
-                    if preset > MAX_PRESET: preset = 0
-                    elif preset < 0: preset = MAX_PRESET
-
-                    print(f"ENCODER: Click Confirmed. New Preset: {preset}")
+                    if preset > MAX_PRESET: 
+                        preset = 0
+                    elif preset < 0: 
+                        preset = MAX_PRESET
+                    
+                    print(f"DEBUG: Encoder Triggered. New Preset: {preset}")
                     LoadSamples()
-
-                    counter = 0 # Reset for next physical click
-
-                last_AB = current_AB
-
+                    last_time = now
+            
+            last_state = current_state
+            # Polling speed
             time.sleep(0.001)
 
-    threading.Thread(target=EncoderProcess, daemon=True).start()
+    EncoderThread = threading.Thread(target=EncoderProcess)
+    EncoderThread.daemon = True
+    EncoderThread.start()
+
+if USE_ENCODER_WORKING:
+    import RPi.GPIO as GPIO
+    import threading
+    import time
+
+    def EncoderProcess():
+        # MOSI = GPIO 10, MISO = GPIO 9
+        ENC_A = 10
+        ENC_B = 9
+        
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setup(ENC_A, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        GPIO.setup(ENC_B, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+
+        global preset
+        last_state = GPIO.input(ENC_A)
+
+        while True:
+            current_state = GPIO.input(ENC_A)
+            
+            # Detect transition on Pin A
+            if current_state != last_state:
+                # Check Pin B to determine direction
+                if GPIO.input(ENC_B) != current_state:
+                    preset += 1
+                else:
+                    preset -= 1
+
+                # Keep presets within 0-127 range
+                if preset > 127: preset = 0
+                elif preset < 0: preset = 127
+                
+                LoadSamples()
+            
+            last_state = current_state
+            # Fast polling (2ms) to ensure no missed clicks
+            time.sleep(0.002)
+
+    EncoderThread = threading.Thread(target=EncoderProcess)
+    EncoderThread.daemon = True
+    EncoderThread.start()
 
 
 #########################################
@@ -573,48 +510,45 @@ if USE_SSD1306:
                 # Bottom line: Optional status
                 draw.text((0, 45), text2, font=font, fill="white")
 
+# --- Integration into your existing functions ---
 
+# Update your EncoderProcess to refresh the screen
+# Inside your while True loop, after LoadSamples():
+if USE_SSD1306:
+    DisplayUpdate(f"Preset: {preset}", "Loading...")
+
+# Update the end of the LoadSamples() function:
+def LoadSamples():
+    # ... existing SamplerBox code ...
+    if USE_SSD1306:
+        # If your version of SamplerBox defines 'basename', use that for a cleaner name
+        DisplayUpdate(f"P: {preset}", basename if 'basename' in locals() else "")
 
 #########################################
 # MIDI IN via SERIAL PORT
+#
 #########################################
 
 if USE_SERIALPORT_MIDI:
     import serial
-    # Use 38400 here! The midi-uart0 overlay converts it to 31250.
-    ser = serial.Serial('/dev/ttyAMA0', baudrate=38400)
-
+    ser = serial.Serial('/dev/ttyAMA0', baudrate=31250)
     def MidiSerialCallback():
         message = [0, 0, 0]
         while True:
-            try:
-                data = ord(ser.read(1))
-
-                # Skip MIDI Real-time/Active Sensing (248-254)
-                if data >= 0xF8:
-                    continue
-
-                # Status byte found (128-239)
-                if data & 0x80:
-                    message[0] = data
-                    message[1] = ord(ser.read(1))
-
-                    # Program change (0xC0) and Aftertouch (0xD0) are 2-byte
-                    if (data & 0xF0) != 0xC0 and (data & 0xF0) != 0xD0:
-                        message[2] = ord(ser.read(1))
-                    else:
-                        message[2] = 0
-
-                    MidiCallback(message, None)
-
-            except Exception as e:
-                print(f"Serial Error: {e}")
-
-    # --- THIS PART WAS MISSING OR MISALIGNED ---
+            i = 0
+            while i < 3:
+                data = ord(ser.read(1))  # read a byte
+                if data >> 7 != 0:
+                    i = 0      # status byte!   this is the beginning of a midi message: http://www.midi.org/techspecs/midimessages.php
+                message[i] = data
+                i += 1
+                if i == 2 and message[0] >> 4 == 12:  # program change: don't wait for a third byte: it has only 2 bytes
+                    message[2] = 0
+                    i = 3
+            MidiCallback(message, None)
     MidiThread = threading.Thread(target=MidiSerialCallback)
     MidiThread.daemon = True
     MidiThread.start()
-    print("Serial MIDI Thread Started on /dev/ttyAMA0")
 
 #########################################
 # LOAD FIRST SOUNDBANK
@@ -641,7 +575,6 @@ midi_in = [rtmidi.MidiIn(b'in')]
 previous = []
 while True:
     for port in midi_in[0].ports:
-        #print(midi_in[0].ports)
         if port not in previous and b'Midi Through' not in port:
             midi_in.append(rtmidi.MidiIn(b'in'))
             midi_in[-1].callback = MidiCallback
