@@ -223,6 +223,12 @@ def LoadSamples():
     LoadingThread = threading.Thread(target=ActuallyLoad)
     LoadingThread.daemon = True
     LoadingThread.start()
+# Update the end of the LoadSamples() function:
+    # ... existing SamplerBox code ...
+    if USE_SSD1306:
+        # If your version of SamplerBox defines 'basename', use that for a cleaner name
+        DisplayUpdate(f"P: {preset}", basename if 'basename' in locals() else "")
+
 
 NOTES = ["c", "c#", "d", "d#", "e", "f", "f#", "g", "g#", "a", "a#", "b"]
 
@@ -244,6 +250,8 @@ def ActuallyLoad():
         display("E%03d" % preset)
         return
     print('Preset loading: %s (%s)' % (preset, basename))
+    if USE_SSD1306:
+        DisplayUpdate(basename, "Loading...")
     display("L%03d" % preset)
     definitionfname = os.path.join(dirname, "definition.txt")
     if os.path.isfile(definitionfname):
@@ -357,7 +365,6 @@ if USE_BUTTONS:
 # ENCODER
 #
 #########################################
-USE_ENCODER = True
 
 if USE_ENCODER:
     import RPi.GPIO as GPIO
@@ -365,95 +372,56 @@ if USE_ENCODER:
     import time
 
     def EncoderProcess():
-        # MOSI = GPIO 10, MISO = GPIO 9
-        ENC_A = 10
-        ENC_B = 9
-        
+        # MOSI = 10, MISO = 9
+        ENC_A, ENC_B = 10, 9
         GPIO.setmode(GPIO.BCM)
         GPIO.setup(ENC_A, GPIO.IN, pull_up_down=GPIO.PUD_UP)
         GPIO.setup(ENC_B, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
         global preset
-        last_state = GPIO.input(ENC_A)
-        last_time = time.time()
         
-        # Adjust this to the highest folder number you have (e.g., 1 for "1 Saw")
+        # State tracking
+        outcome = [0, -1, 1, 0, 1, 0, 0, -1, -1, 0, 0, 1, 0, 1, -1, 0]
+        last_AB = (GPIO.input(ENC_A) << 1) | GPIO.input(ENC_B)
+        counter = 0
+        
+        # Max folder index (0 and 1)
         MAX_PRESET = 1
 
         while True:
-            current_state = GPIO.input(ENC_A)
+            # Create a 2-bit number from Pin A and B
+            current_A = GPIO.input(ENC_A)
+            current_B = GPIO.input(ENC_B)
+            current_AB = (current_A << 1) | current_B
             
-            # Trigger only on the falling edge (High to Low)
-            if current_state == 0 and last_state == 1:
-                now = time.time()
+            if current_AB != last_AB:
+                # Use a state table to determine direction and ignore "half-steps"
+                # This transition index (last_AB + current_AB) filters noise
+                transition = (last_AB << 2) | current_AB
+                counter += outcome[transition]
                 
-                # Debounce: only allow one trigger every 100ms
-                if (now - last_time) > 0.1:
-                    # Check B pin to determine direction
-                    if GPIO.input(ENC_B) == 0:
+                # Standard encoders usually need 2 or 4 "state changes" to make 1 click
+                # Change the '4' below to '2' if it becomes too slow
+                if abs(counter) >= 4:
+                    if counter > 0:
                         preset += 1
                     else:
                         preset -= 1
-
-                    # Boundary handling
-                    if preset > MAX_PRESET: 
-                        preset = 0
-                    elif preset < 0: 
-                        preset = MAX_PRESET
                     
-                    print(f"DEBUG: Encoder Triggered. New Preset: {preset}")
+                    # Boundary handling
+                    if preset > MAX_PRESET: preset = 0
+                    elif preset < 0: preset = MAX_PRESET
+                    
+                    print(f"ENCODER: Click Confirmed. New Preset: {preset}")
                     LoadSamples()
-                    last_time = now
+                    
+                    counter = 0 # Reset for next physical click
+                
+                last_AB = current_AB
             
-            last_state = current_state
-            # Polling speed
             time.sleep(0.001)
 
-    EncoderThread = threading.Thread(target=EncoderProcess)
-    EncoderThread.daemon = True
-    EncoderThread.start()
-
-if USE_ENCODER_WORKING:
-    import RPi.GPIO as GPIO
-    import threading
-    import time
-
-    def EncoderProcess():
-        # MOSI = GPIO 10, MISO = GPIO 9
-        ENC_A = 10
-        ENC_B = 9
-        
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setup(ENC_A, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-        GPIO.setup(ENC_B, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-
-        global preset
-        last_state = GPIO.input(ENC_A)
-
-        while True:
-            current_state = GPIO.input(ENC_A)
-            
-            # Detect transition on Pin A
-            if current_state != last_state:
-                # Check Pin B to determine direction
-                if GPIO.input(ENC_B) != current_state:
-                    preset += 1
-                else:
-                    preset -= 1
-
-                # Keep presets within 0-127 range
-                if preset > 127: preset = 0
-                elif preset < 0: preset = 127
-                
-                LoadSamples()
-            
-            last_state = current_state
-            # Fast polling (2ms) to ensure no missed clicks
-            time.sleep(0.002)
-
-    EncoderThread = threading.Thread(target=EncoderProcess)
-    EncoderThread.daemon = True
-    EncoderThread.start()
+    threading.Thread(target=EncoderProcess, daemon=True).start()
 
 
 #########################################
@@ -510,19 +478,7 @@ if USE_SSD1306:
                 # Bottom line: Optional status
                 draw.text((0, 45), text2, font=font, fill="white")
 
-# --- Integration into your existing functions ---
 
-# Update your EncoderProcess to refresh the screen
-# Inside your while True loop, after LoadSamples():
-if USE_SSD1306:
-    DisplayUpdate(f"Preset: {preset}", "Loading...")
-
-# Update the end of the LoadSamples() function:
-def LoadSamples():
-    # ... existing SamplerBox code ...
-    if USE_SSD1306:
-        # If your version of SamplerBox defines 'basename', use that for a cleaner name
-        DisplayUpdate(f"P: {preset}", basename if 'basename' in locals() else "")
 
 #########################################
 # MIDI IN via SERIAL PORT
